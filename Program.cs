@@ -15,8 +15,8 @@ public class Program
 
         SDL_Renderer* renderer = SDL3.SDL_CreateRenderer(window, string.Empty);
         if (renderer == null) {Console.WriteLine("Cant create renderer"); SDL3.SDL_Quit(); return;}
+        SDL3.SDL_SetRenderDrawBlendMode(renderer, SDL_BlendMode.SDL_BLENDMODE_BLEND);
 
-        DrawRectBatch.Renderer = renderer;
         ulong last_counter = SDL3.SDL_GetPerformanceCounter();
         ulong frequency = SDL3.SDL_GetPerformanceFrequency();
         
@@ -37,12 +37,9 @@ public class Program
         //     SDL3.SDL_DestroySurface(textSurface);
         // }
 
-        DrawRectBatch batch1 = new();
-        Button newButton = new(){ Position = UDim.UseOffset(100, 200), Size = UDim.UseOffset(200, 200), Color = ColorRGBA.GREEN };
-        Button newButton2 = new(){ Position = UDim.UseOffset(200, 400), Size = UDim.UseOffset(200, 200), Color = ColorRGBA.RED };
-
-        batch1.AddBatch(newButton);
-        batch1.AddBatch(newButton2);
+        DrawRectBatch batch1 = new(renderer, window);
+        DrawRectBatch.WindowResizedEvent();
+        Button newButton = new(){ Position = UDim.UseScale(0.5f, 0.5f), Origin = new(){ x=0.5f, y=0.5f }, Size = UDim.UseScale(0.5f, 0.5f), Color = ColorRGBA.GREEN };
 
         bool isRunning = true;
         SDL_Event evnt;
@@ -50,8 +47,13 @@ public class Program
         {
             while (SDL3.SDL_PollEvent(&evnt))
             {
+                newButton.HandleEvent(&evnt);
                 switch (evnt.type)
                 {
+                    case (uint)SDL_EventType.SDL_EVENT_WINDOW_RESIZED:
+                        DrawRectBatch.WindowResizedEvent();
+                        break;
+
                     case (uint)SDL_EventType.SDL_EVENT_QUIT:
                         isRunning = false;
                         break;
@@ -69,21 +71,18 @@ public class Program
             }
 
             ulong current_counter = SDL3.SDL_GetPerformanceCounter();
-            double dt = current_counter - last_counter / frequency;
+            double dt = (double)(current_counter - last_counter) / frequency;
             last_counter = current_counter;
 
             newButton.Update((float)dt);
-            // newButton2.Update((float)dt);
 
             SDL3.SDL_SetRenderDrawColor(renderer, 255, 255, 255, 255);
             SDL3.SDL_RenderClear(renderer);
 
-            batch1.DrawBatch();
-
-            // if (textTexture is not null)
-            // {
-            //     SDL3.SDL_RenderTexture(renderer, textTexture, null, &textRect);
-            // }
+            batch1.Begin();
+            batch1.Push(newButton);
+            // batch1.Push(newButton2);
+            batch1.End();
 
             SDL3.SDL_RenderPresent(renderer);
         }
