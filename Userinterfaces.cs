@@ -5,6 +5,11 @@ using System.Drawing;
 
 namespace Daybreak.UI
 {
+    public struct Origin
+    {
+        public float x;
+        public float y;
+    }
     public struct UDim
     {
         public float xScale;
@@ -15,6 +20,14 @@ namespace Daybreak.UI
         public static UDim UseOffset(float xOffset, float yOffset) => new(){xScale=0, yScale=0, xOffset=xOffset, yOffset=yOffset};
         public static UDim UseScale(float xScale, float yScale) => new(){xScale=xScale, yScale=yScale, xOffset=0, yOffset=0};
         public static UDim Zero() => new(){xScale=0, yScale=0, xOffset=0, yOffset=0};
+
+        public static UDim CalcAbs(UDim udim, int sh, int sw) => new()
+            {
+                xScale = 0,
+                yScale = 0,
+                xOffset = udim.xOffset + (Math.Clamp(udim.xScale, 0, 1) * sw),
+                yOffset = udim.yOffset + (Math.Clamp(udim.yScale, 0, 1) * sh),
+            };
     }
     public struct ColorRGBA
     {
@@ -57,62 +70,167 @@ namespace Daybreak.UI
         public static SDL_Renderer* renderer { get; set; }
         public UDim Position { get; set; }
         public UDim Size { get; set; }
+        public Origin Origin { get; set; }
         public ColorRGBA Color { get; set; }
 
         public abstract void Update(float dt);
+        public abstract void HandleEvent(SDL_Event* evnt);
     }
+
     public unsafe class DrawRectBatch
     {
         public static SDL_Renderer* Renderer { get; set; } 
-        private static Dictionary<uint, List<SDL_FRect>> colorBatches = [];
+        public static SDL_Window* Window { get; set; }
+        public static int WindowWidth { get; private set; }
+        public static int WindowHeight { get; private set; }
 
-        public void AddBatch(Element element)
+        private SDL_Vertex[] _vertices;
+        private int[] _indices;
+        private int _vertexCount;
+        private int _indexCount;
+
+        public DrawRectBatch(SDL_Renderer* renderer, SDL_Window* window, int initialRectCapacity = 512)
         {
-            UDim Position = element.Position;
-            UDim Size = element.Size;
-            ColorRGBA Color = element.Color;
+            Renderer = renderer;
+            Window = window;
 
-            if (!colorBatches.TryGetValue(ColorRGBA.RgbaToUint(Color), out var custlist))
+            _vertices = new SDL_Vertex[initialRectCapacity * 4];
+            _indices = new int[initialRectCapacity * 6];
+        }
+        public static void WindowResizedEvent()
+        {
+            int w = 0, h = 0;
+            SDL3.SDL_GetWindowSize(Window, &w, &h);
+            WindowWidth = w;
+            WindowHeight = h;
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        public void Begin()
+        {
+            _vertexCount = 0;
+            _indexCount = 0;
+        }
+        public void Push(Element element)
+        {
+            EnsureCapacity(1);
+
+            UDim pos = element.Position;
+            UDim sz = element.Size;
+
+            if (pos.xScale != 0 || pos.yScale != 0) 
+                pos = UDim.CalcAbs(pos, WindowHeight, WindowWidth);
+            if (sz.xScale != 0 || sz.yScale != 0) 
+                sz = UDim.CalcAbs(sz, WindowHeight, WindowWidth);
+
+            float originX = Math.Clamp(element.Origin.x, 0, 1) * sz.xOffset;
+            float originY = Math.Clamp(element.Origin.y, 0, 1) * sz.yOffset;
+
+            float x0 = pos.xOffset - originX;
+            float y0 = pos.yOffset - originY;
+            float x1 = x0 + sz.xOffset;
+            float y1 = y0 + sz.yOffset;
+
+            ColorRGBA c = element.Color;
+            SDL_FColor color = new()
             {
-                custlist = new();
-                colorBatches[ColorRGBA.RgbaToUint(Color)] = custlist;
+                r = c.R / 255f,
+                g = c.G / 255f,
+                b = c.B / 255f,
+                a = c.A / 255f
+            };
+
+            int baseVertex = _vertexCount;
+
+            _vertices[baseVertex + 0] = new SDL_Vertex { position = new SDL_FPoint { x = x0, y = y0 }, color = color };
+            _vertices[baseVertex + 1] = new SDL_Vertex { position = new SDL_FPoint { x = x1, y = y0 }, color = color };
+            _vertices[baseVertex + 2] = new SDL_Vertex { position = new SDL_FPoint { x = x1, y = y1 }, color = color };
+            _vertices[baseVertex + 3] = new SDL_Vertex { position = new SDL_FPoint { x = x0, y = y1 }, color = color };
+
+            int baseIndex = _indexCount;
+            _indices[baseIndex + 0] = baseVertex + 0;
+            _indices[baseIndex + 1] = baseVertex + 1;
+            _indices[baseIndex + 2] = baseVertex + 2;
+            _indices[baseIndex + 3] = baseVertex + 2;
+            _indices[baseIndex + 4] = baseVertex + 3;
+            _indices[baseIndex + 5] = baseVertex + 0;
+
+            _vertexCount += 4;
+            _indexCount += 6;
+        }
+        public void End()
+        {
+            if (_vertexCount == 0) return;
+
+            fixed (SDL_Vertex* pVertices = _vertices)
+            fixed (int* pIndices = _indices)
+            {
+                SDL3.SDL_RenderGeometry(
+                    Renderer,
+                    null,
+                    pVertices,
+                    _vertexCount,
+                    pIndices,
+                    _indexCount
+                );
+            }
+        }
+
+        [MethodImpl(MethodImplOptions.AggressiveInlining)]
+        private void EnsureCapacity(int rectCountToAdd)
+        {
+            int neededVertices = _vertexCount + (rectCountToAdd * 4);
+            int neededIndices = _indexCount + (rectCountToAdd * 6);
+
+            if (neededVertices > _vertices.Length)
+            {
+                Array.Resize(ref _vertices, Math.Max(_vertices.Length * 2, neededVertices));
             }
 
-            custlist.Add(new(){x=Position.xOffset, y=Position.yOffset, h=Size.yOffset, w=Size.xOffset});
-        }
-        public void DrawBatch()
-        {
-            foreach (var kvp in colorBatches)
+            if (neededIndices > _indices.Length)
             {
-                List<SDL_FRect> rects = kvp.Value;
-                
-                if (rects.Count == 0) continue;
-
-                ColorRGBA color = ColorRGBA.UintToRgba(kvp.Key);
-
-                // Set state ONCE per color group
-                SDL3.SDL_SetRenderDrawColor(Renderer, (byte)color.R, (byte)color.G, (byte)color.B, (byte)color.A);
-
-                // Draw the whole batch zero-copy
-                Span<SDL_FRect> rectSpan = CollectionsMarshal.AsSpan(rects);
-                fixed (SDL_FRect* rectPtr = rectSpan)
-                {
-                    SDL3.SDL_RenderFillRects(Renderer, rectPtr, rects.Count);
-                }
+                Array.Resize(ref _indices, Math.Max(_indices.Length * 2, neededIndices));
             }
         }
     }
+
     public class Button : Element
     {
-        public override unsafe void Update(float dt)
+        public override unsafe void HandleEvent(SDL_Event* evnt)
         {
             float x, y;
             SDL_MouseButtonFlags buttons = SDL3.SDL_GetMouseState(&x, &y);
 
-            if (x > Position.xOffset && y > Position.yOffset && x < (Position.xOffset + Size.xOffset) && y < (Position.yOffset + Size.yOffset))
+            UDim pos = Position;
+            UDim sz = Size;
+
+            if (pos.xScale != 0 || pos.yScale != 0) 
+                pos = UDim.CalcAbs(pos, DrawRectBatch.WindowHeight, DrawRectBatch.WindowWidth);
+            if (sz.xScale != 0 || sz.yScale != 0) 
+                sz = UDim.CalcAbs(sz, DrawRectBatch.WindowHeight, DrawRectBatch.WindowWidth);
+
+            float originX = Math.Clamp(Origin.x, 0, 1) * sz.xOffset;
+            float originY = Math.Clamp(Origin.y, 0, 1) * sz.yOffset;
+
+            float x0 = pos.xOffset - originX;
+            float y0 = pos.yOffset - originY;
+            float x1 = x0 + sz.xOffset;
+            float y1 = y0 + sz.yOffset;
+
+            if (x > x0 && y > y0 && x < x1 && y < y1)
             {
-                Console.WriteLine("Hovered!");
+                if (evnt->type == (uint)SDL_EventType.SDL_EVENT_MOUSE_BUTTON_DOWN){
+                    Console.WriteLine("Button Down");
+                    if (evnt->button.button == SDL3.SDL_BUTTON_LEFT)
+                    {
+                        Console.WriteLine("Clicked");
+                    }
+                }
             }
+        }
+        public override void Update(float dt)
+        {
+
         }
     }
 }
